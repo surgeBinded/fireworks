@@ -7,7 +7,7 @@
 #define NUM_LEDS 256
 
 // Define the Data Pin
-#define DATA_PIN 5  // Connected to the data pin of the first LED strip
+#define DATA_PIN 5
 
 // Define the array of leds
 CRGB leds[NUM_LEDS];
@@ -153,7 +153,6 @@ const int fullMatrix[16][16] PROGMEM = {
 };
 
 void setup() { 
-  Serial.begin(9600);
   srand(time(NULL));
   FastLED.addLeds<NEOPIXEL,DATA_PIN>(leds, NUM_LEDS);  // Init of the Fastled library
   FastLED.setBrightness(15);
@@ -187,11 +186,10 @@ void doFireworks(){
     // launch firework
     for(int i = 0; i < height; i++){
         FastLED.clear();
-
         
-    int r = rand() % 254;
-    int g = rand() % 254;
-    int b = rand() % 254;
+        int r = rand() % 254;
+        int g = rand() % 254;
+        int b = rand() % 254;
 
         row = 15 - i;
         int rowCopy = row;
