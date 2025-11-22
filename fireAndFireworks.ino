@@ -17,10 +17,14 @@ enum Mode {
 };
 
 Mode currentMode = MODE_FIRE;
+
 CRGB leds[NUM_LEDS];
 
 // Heat map for fire (y = 0 is bottom, y = 15 is top in fire-space)
 byte heat[MATRIX_HEIGHT][MATRIX_WIDTH];
+
+const uint8_t CORE_NOISE_X_SCALE = 30;
+const uint8_t CORE_NOISE_Y_SCALE = 55;
 
 // Noise for flame top shape (per column)
 uint16_t gFlameNoiseTime = 0;
@@ -68,6 +72,7 @@ const int fullMatrix[MATRIX_HEIGHT][MATRIX_WIDTH] PROGMEM = {
 // =======================
 // HEART GROWTH STAGES
 // =======================
+
 bool isHeartPixel(uint8_t frame, uint8_t x, uint8_t y) {
   switch (frame) {
     case 0:
@@ -148,6 +153,7 @@ bool isHeartPixel(uint8_t frame, uint8_t x, uint8_t y) {
 // =======================
 // BUTTON / MODE HANDLING
 // =======================
+
 int lastButtonReading = HIGH;      // because of INPUT_PULLUP
 int stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
@@ -275,6 +281,7 @@ void doFireworksOnce() {
           leds[pgm_read_word(&(fullMatrix[rowCopy][startPositionCopy - j]))]     = CRGB(r, g, b);
         }
 
+        
         FastLED.show();
         smartDelay(delayedBy, myMode);
         if (shouldExitMode(myMode)) return;
@@ -287,6 +294,7 @@ void doFireworksOnce() {
     if (shouldExitMode(myMode)) return;
   }
 }
+
 
 // Update particle positions / spawn new ones
 void updateParticles() {
@@ -343,6 +351,8 @@ void renderParticles() {
   }
 }
 
+
+
 // =======================
 // FIRE ANIMATION
 // =======================
@@ -395,94 +405,108 @@ void fireStep() {
     flameTopY[x] = (uint8_t)top;
   }
 
-  // 4. MAP HEAT TO COLORS (with soft noise-shaped top + organic color)
+  // 4. MAP HEAT TO COLORS
   FastLED.clear();
   for (int y = 0; y < MATRIX_HEIGHT; y++) {
     for (int x = 0; x < MATRIX_WIDTH; x++) {
       uint8_t h = heat[y][x];
 
-      // small smoothing near bottom (original)
+      if (h == 0 && y <= 1) {
+        // base “log/core” heat
+        h = random8(120, 220);
+      }
+
+      if (h == 0) {
+        continue;
+      }
+
+      // small smoothing near bottom (keeps base fire body nice)
       if (y == 1) {
         h = (uint8_t)((heat[1][x] + heat[0][x]) / 2);
       } else if (y == 2) {
         h = (uint8_t)((heat[2][x] + heat[1][x]) / 2);
       }
 
-      // --- SOFT NOISE SHAPING OF FLAME TOP ---
+      // --- SOFT NOISE-SHAPED TOP (keep your tongues) ---
       int8_t dy = y - flameTopY[x];
-
       if (dy > 0) {
         uint8_t atten;
-        if (dy == 1)      atten = 180; // just above top
-        else if (dy == 2) atten = 120; // a bit higher
-        else              atten = 70;  // near very top: mostly faint tongues
+        if (dy == 1)      atten = 180;
+        else if (dy == 2) atten = 120;
+        else              atten = 70;
 
         h = scale8(h, atten);
 
-        // For very high rows, make it "sporadic"
+        // sparse high wisps at very top
         if (y >= MATRIX_HEIGHT - 2 && h > 0) {
           if (random8() < 120) {
             h = 0;
           }
         }
       }
-      // --------------------------------------
 
       if (h == 0) {
         continue;
       }
 
-      // base palette color from heat
-      uint8_t colorIndex = scale8(h, 240);
-      if (colorIndex > 220) colorIndex = 220;
-      CRGB baseColor = ColorFromPalette(gPal, colorIndex);
-
-      // ============ ORGANIC COLOR NOISE (no hard row cuts) ============
-      // distance from bottom: 0 at bottom, ~255 at top
+            // =================== COLUMN-BASED WAVES ====================
+      // distance from bottom (0 at bottom, 255 at top)
       uint8_t distFromBottom = (uint8_t)((255UL * y) / (MATRIX_HEIGHT - 1));
-      // how strong the "core fire" effect is: strong at bottom, weak at top
+      // strong near bottom, weak near top
       uint8_t coreStrength   = 255 - distFromBottom;
 
-      // 2D noise field
-      uint16_t xoff = x * COLOR_NOISE_X_SCALE;
-      uint8_t  n    = inoise8(xoff, gColorNoiseTime + y * 25); // 0..255
+      // 1D noise field per column → coherent vertical "waves"
+      uint16_t coreXoff = x * CORE_NOISE_X_SCALE;
+      uint8_t coreN     = inoise8(coreXoff, gColorNoiseTime);  // depends only on x + time
 
-      // convert base to HSV and warp it
-      CHSV hsv = rgb2hsv_approximate(baseColor);
+      // Column core intensity, stronger near bottom
+      uint8_t columnCore = scale8(coreN, coreStrength);
 
-      // hue jitter based on noise + stronger near bottom
-      // max jitter ≈ 3..12 degrees depending on height
-      uint8_t maxJitter = map(coreStrength, 0, 255, 3, 12);
-      int16_t hueJitter = map((int16_t)n - 128, -128, 127, -maxJitter, maxJitter);
+      // Combine with physical heat (but keep it softer than before)
+      uint8_t combined = qadd8(scale8(h, 180), columnCore);
 
-      int16_t newHue = (int16_t)hsv.hue + hueJitter;
-      if (newHue < 0)   newHue = 0;
-      if (newHue > 60)  newHue = 60;  // stay in red–orange–yellow
+      // ----- Map combined intensity to color tiers (wave-style) -----
+      uint8_t hue;
+      uint8_t sat;
+      uint8_t val;
 
-      hsv.hue = (uint8_t)newHue;
 
-      // brightness mostly from heat, but allow extra “white-hot” pops near bottom
-      uint8_t baseVal = hsv.val;
-      uint8_t extraValMax = map(coreStrength, 0, 255, 0, 80); // only strong low down
-
-      if (n > 210 && h > 180 && coreStrength > 100) {
-        // rare white-hot cores
-        hsv.val = 255;
-        hsv.sat = scale8(hsv.sat, 160);  // slightly desaturate → whitish yellow
+      // very hot core only in lower part (y <= 3)
+      if (combined > 230 && y <= 3) {
+        hue = 35;   // yellowish
+        sat = 40;   // almost white
+        val = 255;
+      } else if (combined > 190) {
+        // bright yellow
+        hue = 40;
+        sat = 140;
+        val = 255;
+      } else if (combined > 140) {
+        // orange
+        hue = 20;
+        sat = 220;
+        val = 240;
       } else {
-        // little variation everywhere, stronger at bottom
-        uint8_t extraVal = map(n, 0, 255, 0, extraValMax);
-        hsv.val = qadd8(baseVal, extraVal);
+        // deep red
+        hue = 0;
+        sat = 255;
+        val = 210;
       }
 
-      // some deeper orange/red pockets (not tied to a specific row)
-      if (n < 50 && coreStrength > 80) {
-        hsv.val = scale8(hsv.val, 210);   // slightly dimmer
-        hsv.sat = qadd8(hsv.sat, 30);     // more saturated → deeper color
+      // subtle flicker using the column noise
+      val = qadd8(val, coreN >> 4);
+
+      // guaranteed hot base
+      if (y == 0) {
+        val = 255;
+      } else if (y == 1 && val < 220) {
+        val = 220;
       }
 
+
+      CHSV hsv(hue, sat, val);
       CRGB color = hsv;
-      // ================================================================
+      // =================================================
 
       int matrixRow = MATRIX_HEIGHT - 1 - y;
       int index     = pgm_read_word(&(fullMatrix[matrixRow][x]));
@@ -490,12 +514,16 @@ void fireStep() {
     }
   }
 
+
+
   // 5. Update + draw embers floating above the flame
   updateParticles();
   renderParticles();
 
   FastLED.show();
 }
+
+
 
 // =======================
 // SETUP & LOOP
@@ -505,6 +533,7 @@ void setup() {
   FastLED.setBrightness(64);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+
   randomSeed(analogRead(A0));
 
   for (int y = 0; y < MATRIX_HEIGHT; y++) {
